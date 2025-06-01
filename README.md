@@ -88,4 +88,4 @@ This solution follows AWS security best practices including:
 - Systems Manager for secure command execution
 - Encrypted data storage
 - No hardcoded credentials
-# ec2-disk-monitoring-ansible
+
