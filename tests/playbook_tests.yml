@@ -1,0 +1,97 @@
+---
+#####################################
+# Monitoring Solution Test Suite
+#####################################
+
+- name: Test Management Account Setup
+  hosts: management
+  gather_facts: false
+  tags: [test_management]
+  
+  tasks:
+    - name: Test S3 bucket configuration
+      block:
+        - name: Verify S3 bucket exists
+          amazon.aws.s3_bucket_info:
+            name: "{{ s3.bucket.name }}"
+          register: s3_test
+          
+        - name: Verify bucket encryption
+          assert:
+            that:
+              - s3_test.bucket.encryption is defined
+              - s3_test.bucket.versioning.Status == "Enabled"
+            fail_msg: "S3 bucket security configuration failed"
+      tags: [test_s3]
+
+    - name: Test Lambda function
+      block:
+        - name: Verify Lambda function exists
+          amazon.aws.lambda_info:
+            name: "{{ lambda.function_name }}"
+          register: lambda_test
+
+        - name: Test Lambda execution
+          amazon.aws.lambda:
+            name: "{{ lambda.function_name }}"
+            payload:
+              test: true
+            invocation_type: RequestResponse
+          register: lambda_execution
+      tags: [test_lambda]
+
+    - name: Test CloudWatch dashboard
+      block:
+        - name: Verify dashboard exists
+          amazon.aws.cloudwatch_dashboard_info:
+            dashboard_name: "{{ cloudwatch.dashboard.name }}"
+          register: dashboard_test
+          
+        - name: Verify dashboard widgets
+          assert:
+            that:
+              - dashboard_test.dashboard.body.widgets | length > 0
+            fail_msg: "Dashboard configuration invalid"
+      tags: [test_dashboard]
+
+- name: Test Member Account Configuration
+  hosts: member_accounts
+  gather_facts: false
+  tags: [test_member]
+  
+  tasks:
+    - name: Test CloudWatch agent
+      block:
+        - name: Check agent status
+          amazon.aws.aws_ssm_send_command:
+            instance_ids: "{{ instance_id }}"
+            document_name: "AWS-RunShellScript"
+            parameters:
+              commands:
+                - "/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a status"
+          register: agent_test
+          
+        - name: Verify agent configuration
+          assert:
+            that:
+              - "'running' in agent_test.stdout"
+            fail_msg: "CloudWatch agent not running"
+      tags: [test_agent]
+
+    - name: Test metric collection
+      block:
+        - name: Collect test metrics
+          include_role:
+            name: disk-monitoring
+            tasks_from: collect.yml
+          vars:
+            test_mode: true
+          register: collection_test
+          
+        - name: Verify metric format
+          assert:
+            that:
+              - collection_test.formatted_metrics is defined
+              - collection_test.formatted_metrics | length > 0
+            fail_msg: "Metric collection failed"
+      tags: [test_collection]

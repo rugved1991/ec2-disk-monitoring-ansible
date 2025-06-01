@@ -1,0 +1,190 @@
+---
+#####################################
+# Disk Metric Collection Tasks
+# Last Updated: 2025-05-31
+#####################################
+
+#####################################
+# Pre-collection Validation
+#####################################
+- name: Validate collection prerequisites
+  block:
+    - name: Check instance connectivity
+      amazon.aws.aws_ssm_send_command:
+        instance_ids: "{{ instance_id }}"
+        document_name: "AWS-RunShellScript"
+        parameters:
+          commands: ["echo 'Connectivity test'"]
+      register: connectivity_test
+      until: connectivity_test is success
+      retries: 3
+      delay: 5
+      tags: [validate, connectivity]
+
+    - name: Verify CloudWatch agent status
+      amazon.aws.aws_ssm_send_command:
+        instance_ids: "{{ instance_id }}"
+        document_name: "AWS-RunShellScript"
+        parameters:
+          commands:
+            - "/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a status"
+      register: agent_status
+      failed_when: "'running' not in agent_status.stdout | default('')"
+      tags: [validate, agent]
+  rescue:
+    - name: Handle validation failure
+      include_tasks: error_handler.yml
+      vars:
+        error_context:
+          operation: "Pre-collection Validation"
+          error_details: "{{ ansible_failed_result }}"
+
+#####################################
+# Disk Metric Collection
+#####################################
+- name: Collect disk metrics
+  block:
+    - name: Get disk utilization data
+      amazon.aws.aws_ssm_send_command:
+        instance_ids: "{{ instance_id }}"
+        document_name: "AWS-RunShellScript"
+        parameters:
+          commands:
+            - |
+              df -h --output=source,size,used,avail,pcent | 
+              grep '^/dev/' | 
+              awk -v instance_id="{{ instance_id }}" \
+                  -v timestamp="$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+                  -v account_id="{{ aws_account_id }}" '
+              {
+                printf "{\\"timestamp\\":\\"%s\\",\\"account_id\\":\\"%s\\",\\"instance_id\\":\\"%s\\",\\"device\\":\\"%s\\",\\"size\\":\\"%s\\",\\"used\\":\\"%s\\",\\"available\\":\\"%s\\",\\"used_percent\\":%d}\n",
+                timestamp, account_id, instance_id, $1, $2, $3, $4, substr($5, 1, length($5)-1)
+              }'
+      register: disk_metrics
+      until: disk_metrics is success
+      retries: "{{ error_handling.retry.max_attempts }}"
+      delay: "{{ error_handling.retry.delay }}"
+      tags: [collect, metrics]
+
+    - name: Parse and validate metrics
+      set_fact:
+        formatted_metrics: "{{ disk_metrics.stdout_lines | map('from_json') | list }}"
+      tags: [collect, format]
+
+    - name: Check metric values
+      assert:
+        that:
+          - item.used_percent is number
+          - item.used_percent >= 0
+          - item.used_percent <= 100
+        fail_msg: "Invalid metric value for device {{ item.device }}"
+      loop: "{{ formatted_metrics }}"
+      tags: [collect, validate]
+
+#####################################
+# Metric Processing
+#####################################
+- name: Process collected metrics
+  block:
+    - name: Add metadata to metrics
+      set_fact:
+        enriched_metrics:
+          timestamp: "{{ ansible_date_time.iso8601 }}"
+          account_id: "{{ aws_account_id }}"
+          instance_id: "{{ instance_id }}"
+          metrics: "{{ formatted_metrics }}"
+          tags:
+            Environment: "{{ env | default('production') }}"
+            Region: "{{ aws_region }}"
+      tags: [process, enrich]
+
+    - name: Check threshold violations
+      set_fact:
+        threshold_violations: "{{ formatted_metrics | json_query('[?used_percent > `' + monitoring.thresholds.warning.disk_used_percent | string + '`]') }}"
+      tags: [process, thresholds]
+
+#####################################
+# Metric Storage
+#####################################
+- name: Store metrics
+  block:
+    - name: Upload metrics to S3
+      amazon.aws.aws_s3:
+        bucket: "{{ s3.bucket.name }}"
+        object: "{{ s3.metrics_prefix }}/{{ aws_account_id }}/{{ instance_id }}/{{ ansible_date_time.year }}/{{ ansible_date_time.month }}/{{ ansible_date_time.day }}/{{ ansible_date_time.hour }}.json"
+        content: "{{ enriched_metrics | to_json }}"
+        mode: put
+        encryption: "{{ s3.bucket.encryption }}"
+      register: s3_upload
+      tags: [store, s3]
+
+    - name: Verify S3 upload
+      amazon.aws.aws_s3:
+        bucket: "{{ s3.bucket.name }}"
+        object: "{{ s3_upload.object }}"
+        mode: get
+      register: s3_verify
+      tags: [store, verify]
+  rescue:
+    - name: Handle storage failure
+      include_tasks: error_handler.yml
+      vars:
+        error_context:
+          operation: "Metric Storage"
+          error_details: "{{ ansible_failed_result }}"
+
+#####################################
+# Alert Processing
+#####################################
+- name: Process alerts
+  block:
+    - name: Check for critical thresholds
+      when: threshold_violations | length > 0
+      include_tasks: process_alerts.yml
+      vars:
+        alert_data:
+          violations: "{{ threshold_violations }}"
+          instance_id: "{{ instance_id }}"
+          timestamp: "{{ ansible_date_time.iso8601 }}"
+      tags: [alerts]
+
+#####################################
+# Backup Processing
+#####################################
+- name: Process backups
+  block:
+    - name: Backup metrics
+      when: backup.enabled | bool
+      amazon.aws.aws_s3:
+        bucket: "{{ s3.bucket.name }}{{ backup.destination.bucket_suffix }}"
+        object: "backup/{{ aws_account_id }}/{{ ansible_date_time.date }}/metrics.json"
+        content: "{{ enriched_metrics | to_json }}"
+        mode: put
+        encryption: "{{ s3.bucket.encryption }}"
+      tags: [backup]
+  rescue:
+    - name: Handle backup failure
+      include_tasks: error_handler.yml
+      vars:
+        error_context:
+          operation: "Metric Backup"
+          error_details: "{{ ansible_failed_result }}"
+
+#####################################
+# Collection Status Update
+#####################################
+- name: Update collection status
+  block:
+    - name: Record collection timestamp
+      amazon.aws.aws_ssm_parameter_store:
+        name: "/monitoring/last_collection/{{ instance_id }}"
+        string_type: "String"
+        value: "{{ ansible_date_time.iso8601 }}"
+        region: "{{ aws_region }}"
+      tags: [status]
+
+    - name: Log collection success
+      debug:
+        msg: "Successfully collected metrics for instance {{ instance_id }}"
+      when: debug.verbose_logging | bool
+      tags: [status, logging]

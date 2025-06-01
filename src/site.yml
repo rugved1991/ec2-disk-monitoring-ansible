@@ -1,0 +1,231 @@
+---
+#####################################
+# Multi-Account AWS EC2 Disk Utilization Monitoring
+# Main Playbook
+# Last Updated: 2025-05-31
+#####################################
+
+#####################################
+# Management Account Setup
+#####################################
+- name: Configure Management Account Resources
+  hosts: management
+  gather_facts: false
+  tags: [management-setup]
+  
+  tasks:
+    - name: Validate management account access
+      block:
+        - name: Check AWS credentials
+          aws_caller_info:
+          register: aws_identity
+          
+        - name: Verify management account
+          assert:
+            that:
+              - aws_identity.account == aws.organizations.management_account_id
+            fail_msg: "Must run from management account"
+      tags: [always]
+
+    - name: Create central S3 bucket
+      amazon.aws.s3_bucket:
+        name: "{{ s3.bucket.name }}"
+        region: "{{ aws_region }}"
+        versioning: "{{ s3.bucket.versioning }}"
+        encryption: "{{ s3.bucket.encryption }}"
+        tags: "{{ aws.tags }}"
+      register: s3_bucket
+      tags: [s3]
+
+    - name: Configure S3 bucket policy
+      amazon.aws.s3_bucket_policy:
+        bucket: "{{ s3.bucket.name }}"
+        policy: "{{ lookup('template', 'templates/s3_bucket_policy.j2') }}"
+      tags: [s3]
+
+    - name: Setup Lambda function
+      amazon.aws.lambda:
+        name: "{{ lambda.function_name }}"
+        state: present
+        zip_file: "files/lambda_function.zip"
+        runtime: "{{ lambda.runtime }}"
+        handler: "{{ lambda.handler }}"
+        timeout: "{{ lambda.timeout }}"
+        memory_size: "{{ lambda.memory_size }}"
+        role: "{{ lambda.role_arn }}"
+        environment_variables: "{{ lambda.environment }}"
+        vpc_config: "{{ lambda.vpc_config if lambda.vpc_config.enabled else omit }}"
+        tags: "{{ aws.tags }}"
+      register: lambda_function
+      tags: [lambda]
+
+    - name: Create CloudWatch dashboard
+      amazon.aws.cloudwatch_dashboard:
+        dashboard_name: "{{ cloudwatch.dashboard.name }}"
+        dashboard_body: "{{ lookup('template', 'templates/dashboard.json.j2') }}"
+      register: dashboard
+      tags: [cloudwatch]
+
+    - name: Configure SNS topics
+      amazon.aws.sns_topic:
+        name: "{{ monitoring.alerts.sns_topic_name }}"
+        subscribers: "{{ monitoring.alerts.subscribers }}"
+        region: "{{ aws_region }}"
+        tags: "{{ aws.tags }}"
+      when: monitoring.alerts.enabled
+      tags: [sns]
+
+#####################################
+# Member Account Configuration
+#####################################
+- name: Configure Member Accounts
+  hosts: member_accounts
+  gather_facts: false
+  tags: [member-setup]
+
+  pre_tasks:
+    - name: Validate member account access
+      block:
+        - name: Get account info
+          aws_caller_info:
+          register: account_info
+
+        - name: Verify member account
+          assert:
+            that:
+              - account_info.account == aws_account_id
+            fail_msg: "Account ID mismatch"
+      tags: [always]
+
+  roles:
+    - role: disk-monitoring
+      vars:
+        monitoring_enabled: true
+      tags: [monitoring]
+
+#####################################
+# Verification and Testing
+#####################################
+- name: Verify Monitoring Setup
+  hosts: all
+  gather_facts: false
+  tags: [verify]
+
+  tasks:
+    - name: Check monitoring components
+      block:
+        - name: Verify CloudWatch agent status
+          amazon.aws.aws_ssm_send_command:
+            instance_ids: "{{ instance_id }}"
+            document_name: "AWS-RunShellScript"
+            parameters:
+              commands:
+                - "/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a status"
+          register: agent_status
+          when: inventory_hostname in groups['member_accounts']
+          
+        - name: Verify metric collection
+          amazon.aws.cloudwatch_metric_alarm_info:
+            region: "{{ aws_region }}"
+          register: metric_info
+          when: inventory_hostname in groups['member_accounts']
+
+        - name: Check S3 bucket access
+          amazon.aws.s3_bucket_info:
+            name: "{{ s3.bucket.name }}"
+          register: s3_info
+          when: inventory_hostname in groups['management']
+
+        - name: Verify Lambda function
+          amazon.aws.lambda_info:
+            name: "{{ lambda.function_name }}"
+          register: lambda_info
+          when: inventory_hostname in groups['management']
+      tags: [verify]
+
+#####################################
+# Backup Configuration
+#####################################
+- name: Configure Backups
+  hosts: management
+  gather_facts: false
+  tags: [backup]
+  
+  tasks:
+    - name: Setup backup bucket
+      amazon.aws.s3_bucket:
+        name: "{{ s3.bucket.name }}{{ backup.destination.bucket_suffix }}"
+        region: "{{ backup.destination.region }}"
+        versioning: true
+        encryption: "{{ s3.bucket.encryption }}"
+        tags: "{{ aws.tags | combine({'Purpose': 'Backup'}) }}"
+      when: backup.enabled
+      tags: [backup]
+
+#####################################
+# Notification Setup
+#####################################
+- name: Configure Notifications
+  hosts: management
+  gather_facts: false
+  tags: [notifications]
+  
+  tasks:
+    - name: Setup notification channels
+      include_tasks: tasks/setup_notifications.yml
+      when: notifications.enabled
+      tags: [notifications]
+
+#####################################
+# Documentation Update
+#####################################
+- name: Update Documentation
+  hosts: localhost
+  gather_facts: false
+  tags: [documentation]
+  
+  tasks:
+    - name: Generate deployment documentation
+      template:
+        src: templates/deployment_doc.j2
+        dest: "docs/deployment_{{ ansible_date_time.date }}.md"
+      when: not debug.test_mode
+      tags: [documentation]
+
+#####################################
+# Error Handling
+#####################################
+  handlers:
+    - name: Handle deployment failure
+      include_tasks: tasks/error_handler.yml
+      vars:
+        error_context:
+          operation: "Deployment"
+          error_details: "{{ ansible_failed_result }}"
+      listen: deployment_failed
+
+#####################################
+# Post-deployment Tasks
+#####################################
+- name: Post-deployment Tasks
+  hosts: localhost
+  gather_facts: false
+  tags: [post-deploy]
+  
+  tasks:
+    - name: Send deployment notification
+      include_tasks: tasks/send_notification.yml
+      vars:
+        notification_type: "deployment"
+        status: "success"
+      when: notifications.enabled
+      tags: [notify]
+
+    - name: Cleanup temporary files
+      file:
+        path: "{{ item }}"
+        state: absent
+      with_fileglob:
+        - "/tmp/monitoring-*"
+      when: not debug.keep_temp_files
+      tags: [cleanup]

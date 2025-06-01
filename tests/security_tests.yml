@@ -1,0 +1,43 @@
+---
+#####################################
+# Security Tests
+#####################################
+
+- name: Test Security Configuration
+  hosts: all
+  gather_facts: false
+  tags: [security]
+  
+  tasks:
+    - name: Test IAM configurations
+      block:
+        - name: Verify IAM roles
+          amazon.aws.iam_role_info:
+            name: "{{ item }}"
+          loop:
+            - "{{ iam.cross_account_role.name }}"
+            - "{{ iam.lambda_role.name }}"
+          when: inventory_hostname in groups['management']
+          
+        - name: Test cross-account access
+          amazon.aws.sts_assume_role:
+            role_arn: "arn:aws:iam::{{ aws_account_id }}:role/{{ iam.cross_account_role.name }}"
+            role_session_name: "SecurityTest"
+          when: inventory_hostname in groups['member_accounts']
+      tags: [test_iam]
+
+    - name: Test encryption configuration
+      block:
+        - name: Verify S3 encryption
+          amazon.aws.s3_bucket_info:
+            name: "{{ s3.bucket.name }}"
+          register: s3_security
+          when: inventory_hostname in groups['management']
+          
+        - name: Assert encryption enabled
+          assert:
+            that:
+              - s3_security.bucket.encryption is defined
+            fail_msg: "S3 encryption not configured"
+          when: inventory_hostname in groups['management']
+      tags: [test_encryption]

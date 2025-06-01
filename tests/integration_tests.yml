@@ -1,0 +1,34 @@
+---
+#####################################
+# Integration Tests
+#####################################
+
+- name: Test End-to-End Integration
+  hosts: all
+  gather_facts: false
+  tags: [integration]
+  
+  tasks:
+    - name: Test complete metric flow
+      block:
+        - name: Collect metrics
+          include_role:
+            name: disk-monitoring
+            tasks_from: collect.yml
+          when: inventory_hostname in groups['member_accounts']
+          
+        - name: Wait for processing
+          pause:
+            seconds: 30
+            
+        - name: Verify S3 storage
+          amazon.aws.s3_object_info:
+            bucket: "{{ s3.bucket.name }}"
+            object: "metrics/{{ aws_account_id }}/latest.json"
+          when: inventory_hostname in groups['member_accounts']
+          
+        - name: Verify CloudWatch metrics
+          amazon.aws.cloudwatch_metric_alarm_info:
+            region: "{{ aws_region }}"
+          when: inventory_hostname in groups['member_accounts']
+      tags: [test_flow]

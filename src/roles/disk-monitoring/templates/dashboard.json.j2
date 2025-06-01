@@ -1,0 +1,109 @@
+{
+    "widgets": [
+        {
+            "type": "metric",
+            "width": 24,
+            "height": 6,
+            "properties": {
+                "metrics": [
+                    {% for account in member_accounts %}
+                    [
+                        "{{ cloudwatch.namespace }}",
+                        "disk_used_percent",
+                        "AccountId",
+                        "{{ account.aws_account_id }}",
+                        {
+                            "label": "Account {{ account.aws_account_id }} Disk Usage",
+                            "color": "#{{ '%06X' % (account.loop.index * 4573) }}"
+                        }
+                    ]{% if not loop.last %},{% endif %}
+                    {% endfor %}
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "{{ aws_region }}",
+                "period": {{ cloudwatch.dashboard.default_period }},
+                "stat": "Average",
+                "title": "Disk Usage Across Accounts",
+                "yAxis": {
+                    "left": {
+                        "min": 0,
+                        "max": 100,
+                        "label": "Disk Usage %"
+                    }
+                }
+            }
+        },
+        {
+            "type": "metric",
+            "width": 12,
+            "height": 6,
+            "properties": {
+                "metrics": [
+                    {% for account in member_accounts %}
+                    [
+                        "{{ cloudwatch.namespace }}",
+                        "disk_free",
+                        "AccountId",
+                        "{{ account.aws_account_id }}",
+                        {
+                            "label": "Account {{ account.aws_account_id }} Free Space",
+                            "color": "#{{ '%06X' % (account.loop.index * 4573) }}"
+                        }
+                    ]{% if not loop.last %},{% endif %}
+                    {% endfor %}
+                ],
+                "view": "bar",
+                "region": "{{ aws_region }}",
+                "period": {{ cloudwatch.dashboard.default_period }},
+                "stat": "Average",
+                "title": "Available Disk Space by Account"
+            }
+        },
+        {
+            "type": "metric",
+            "width": 12,
+            "height": 6,
+            "properties": {
+                "metrics": [
+                    [
+                        "{{ cloudwatch.namespace }}",
+                        "disk_used_percent",
+                        ["AccountId", "InstanceId"],
+                        [
+                            "BIN(MAX)",
+                            "ANOMALY_DETECTION_BAND(MAX, 2)"
+                        ]
+                    ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "{{ aws_region }}",
+                "period": {{ cloudwatch.dashboard.default_period }},
+                "annotations": {
+                    "horizontal": [
+                        {
+                            "label": "Warning",
+                            "value": {{ monitoring.thresholds.warning.disk_used_percent }},
+                            "color": "#ff7f00"
+                        },
+                        {
+                            "label": "Critical",
+                            "value": {{ monitoring.thresholds.critical.disk_used_percent }},
+                            "color": "#ff0000"
+                        }
+                    ]
+                },
+                "title": "Disk Usage with Anomaly Detection"
+            }
+        },
+        {
+            "type": "text",
+            "width": 24,
+            "height": 2,
+            "properties": {
+                "markdown": "# Disk Utilization Dashboard\n* Warning Threshold: {{ monitoring.thresholds.warning.disk_used_percent }}%\n* Critical Threshold: {{ monitoring.thresholds.critical.disk_used_percent }}%\n* Last Updated: ${Date.now()}"
+            }
+        }
+    ]
+}

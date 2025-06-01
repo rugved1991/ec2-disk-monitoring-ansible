@@ -1,0 +1,268 @@
+---
+#####################################
+# Main Tasks for Disk Monitoring Role
+# Last Updated: 2025-05-31
+#####################################
+
+#####################################
+# Pre-flight Checks
+#####################################
+- name: Validate prerequisites
+  block:
+    - name: Check AWS credentials
+      aws_caller_info:
+      register: aws_identity
+      tags: [always, validate]
+
+    - name: Verify required variables
+      assert:
+        that:
+          - aws.region is defined
+          - s3.bucket.name is defined
+          - cloudwatch.namespace is defined
+        fail_msg: "Required variables are not defined"
+      tags: [always, validate]
+
+    - name: Check AWS connectivity
+      aws_caller_info:
+      register: aws_check
+      tags: [always, validate]
+  rescue:
+    - name: Log pre-flight check failure
+      debug:
+        msg: "Pre-flight checks failed: {{ ansible_failed_result }}"
+      failed_when: true
+
+#####################################
+# Install Required Components
+#####################################
+- name: Install and configure monitoring components
+  block:
+    - name: Check if CloudWatch agent is installed
+      stat:
+        path: /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl
+      register: agent_check
+      tags: [install]
+
+    - name: Install CloudWatch agent
+      amazon.aws.aws_ssm_send_command:
+        instance_ids: "{{ instance_id }}"
+        document_name: AWS-ConfigureAWSPackage
+        parameters:
+          action: Install
+          name: AmazonCloudWatchAgent
+      when: not agent_check.stat.exists
+      register: install_result
+      until: install_result is success
+      retries: "{{ error_handling.retry.max_attempts }}"
+      delay: "{{ error_handling.retry.delay }}"
+      tags: [install]
+  rescue:
+    - name: Handle installation failure
+      include_tasks: error_handler.yml
+      vars:
+        error_context:
+          component: "CloudWatch Agent"
+          operation: "Installation"
+          error_details: "{{ ansible_failed_result }}"
+
+#####################################
+# Configure Monitoring
+#####################################
+- name: Configure monitoring components
+  block:
+    - name: Generate CloudWatch agent configuration
+      template:
+        src: cloudwatch-config.json.j2
+        dest: "{{ cloudwatch.agent.config_path }}/config.json"
+        mode: '0644'
+        owner: root
+        group: root
+      register: config_update
+      tags: [configure]
+
+    - name: Apply CloudWatch agent configuration
+      amazon.aws.aws_ssm_send_command:
+        instance_ids: "{{ instance_id }}"
+        document_name: AmazonCloudWatch-ManageAgent
+        parameters:
+          action: configure
+          mode: ec2
+          optionalConfigurationSource: ssm
+          optionalConfigurationLocation: "{{ cloudwatch.agent.config_path }}/config.json"
+      when: config_update.changed
+      register: configure_result
+      until: configure_result is success
+      retries: "{{ error_handling.retry.max_attempts }}"
+      delay: "{{ error_handling.retry.delay }}"
+      tags: [configure]
+  rescue:
+    - name: Handle configuration failure
+      include_tasks: error_handler.yml
+      vars:
+        error_context:
+          component: "CloudWatch Agent"
+          operation: "Configuration"
+          error_details: "{{ ansible_failed_result }}"
+
+#####################################
+# Metric Collection
+#####################################
+- name: Collect disk metrics
+  block:
+    - name: Import metric collection tasks
+      include_tasks: collect.yml
+      tags: [collect, metrics]
+
+    - name: Verify metric collection
+      include_tasks: verify_metrics.yml
+      tags: [verify, metrics]
+  rescue:
+    - name: Handle metric collection failure
+      include_tasks: error_handler.yml
+      vars:
+        error_context:
+          component: "Metric Collection"
+          operation: "Collection"
+          error_details: "{{ ansible_failed_result }}"
+
+#####################################
+# Alert Configuration
+#####################################
+- name: Configure alerts
+  block:
+    - name: Set up CloudWatch alarms
+      include_tasks: configure_alerts.yml
+      when: monitoring.alerts.enabled | bool
+      tags: [alerts]
+
+    - name: Verify alert configuration
+      include_tasks: verify_alerts.yml
+      when: monitoring.alerts.enabled | bool
+      tags: [alerts, verify]
+  rescue:
+    - name: Handle alert configuration failure
+      include_tasks: error_handler.yml
+      vars:
+        error_context:
+          component: "Alerts"
+          operation: "Configuration"
+          error_details: "{{ ansible_failed_result }}"
+
+#####################################
+# Backup Configuration
+#####################################
+- name: Configure backups
+  block:
+    - name: Set up metric backups
+      include_tasks: configure_backups.yml
+      when: backup.enabled | bool
+      tags: [backup]
+
+    - name: Verify backup configuration
+      include_tasks: verify_backups.yml
+      when: backup.enabled | bool
+      tags: [backup, verify]
+  rescue:
+    - name: Handle backup configuration failure
+      include_tasks: error_handler.yml
+      vars:
+        error_context:
+          component: "Backups"
+          operation: "Configuration"
+          error_details: "{{ ansible_failed_result }}"
+
+#####################################
+# Security Validation
+#####################################
+- name: Validate security configuration
+  block:
+    - name: Check security settings
+      include_tasks: security_check.yml
+      when: security.compliance.logging_mandatory | bool
+      tags: [security, compliance]
+
+    - name: Verify encryption settings
+      include_tasks: verify_encryption.yml
+      when: security.encryption.s3.enabled | bool
+      tags: [security, encryption]
+  rescue:
+    - name: Handle security validation failure
+      include_tasks: error_handler.yml
+      vars:
+        error_context:
+          component: "Security"
+          operation: "Validation"
+          error_details: "{{ ansible_failed_result }}"
+
+#####################################
+# Performance Optimization
+#####################################
+- name: Optimize performance
+  block:
+    - name: Configure performance settings
+      include_tasks: optimize_performance.yml
+      when: performance.optimization.enabled | bool
+      tags: [performance]
+
+    - name: Verify performance metrics
+      include_tasks: verify_performance.yml
+      when: performance.optimization.enabled | bool
+      tags: [performance, verify]
+  rescue:
+    - name: Handle performance optimization failure
+      include_tasks: error_handler.yml
+      vars:
+        error_context:
+          component: "Performance"
+          operation: "Optimization"
+          error_details: "{{ ansible_failed_result }}"
+
+#####################################
+# Post-deployment Verification
+#####################################
+- name: Verify deployment
+  block:
+    - name: Run health checks
+      include_tasks: health_check.yml
+      tags: [verify, health]
+
+    - name: Validate monitoring setup
+      include_tasks: validate_monitoring.yml
+      tags: [verify, monitoring]
+
+    - name: Check integration points
+      include_tasks: check_integration.yml
+      tags: [verify, integration]
+  rescue:
+    - name: Handle verification failure
+      include_tasks: error_handler.yml
+      vars:
+        error_context:
+          component: "Verification"
+          operation: "Post-deployment"
+          error_details: "{{ ansible_failed_result }}"
+
+#####################################
+# Cleanup and Finalization
+#####################################
+- name: Finalize setup
+  block:
+    - name: Cleanup temporary files
+      file:
+        path: "{{ item }}"
+        state: absent
+      with_fileglob:
+        - "/tmp/monitoring-*"
+      when: not debug.keep_temp_files | bool
+      tags: [cleanup]
+
+    - name: Update documentation
+      include_tasks: update_docs.yml
+      when: not debug.test_mode | bool
+      tags: [documentation]
+  always:
+    - name: Send deployment notification
+      include_tasks: send_notification.yml
+      when: notifications.enabled | bool
+      tags: [notify]

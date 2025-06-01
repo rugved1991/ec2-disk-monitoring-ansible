@@ -1,0 +1,263 @@
+---
+#####################################
+# Global Variables for AWS Disk Monitoring
+# Last Updated: 2025-05-31
+#####################################
+
+#####################################
+# AWS General Configuration
+#####################################
+aws:
+  region: us-east-1
+  organizations:
+    enabled: true
+    management_account_id: "123456789012"
+  
+  tags:
+    Environment: "{{ env | default('production') }}"
+    Project: "DiskMonitoring"
+    ManagedBy: "Ansible"
+
+#####################################
+# S3 Configuration
+#####################################
+s3:
+  bucket:
+    name: "central-disk-metrics-{{ aws.organizations.management_account_id }}"
+    versioning: true
+    encryption: "AES256"
+    lifecycle_rules:
+      - prefix: "metrics/"
+        expiration_days: 90
+      - prefix: "logs/"
+        expiration_days: 30
+    backup:
+      enabled: true
+      retention_days: 90
+  metrics_prefix: "metrics"
+  logging_enabled: true
+
+#####################################
+# CloudWatch Configuration
+#####################################
+cloudwatch:
+  namespace: "DiskUtilization"
+  metrics:
+    collection_interval: 300  # 5 minutes
+    retention_days: 90
+  agent:
+    config_path: "/opt/aws/amazon-cloudwatch-agent/etc"
+    log_level: "INFO"
+    run_as_user: "root"
+    metrics_collection:
+      disk:
+        resources:
+          - "/"
+          - "/data"
+        measurements:
+          - name: "disk_used_percent"
+            unit: "Percent"
+          - name: "disk_used"
+            unit: "Bytes"
+          - name: "disk_free"
+            unit: "Bytes"
+        ignore_file_systems:
+          - "sysfs"
+          - "devtmpfs"
+          - "tmpfs"
+  dashboard:
+    name: "DiskUtilization"
+    refresh_rate: 60
+    widgets_per_row: 2
+    default_period: 3600
+
+#####################################
+# Lambda Configuration
+#####################################
+lambda:
+  function_name: "DiskMetricsProcessor"
+  runtime: "python3.9"
+  handler: "index.handler"
+  timeout: 300
+  memory_size: 128
+  environment:
+    METRICS_NAMESPACE: "{{ cloudwatch.namespace }}"
+    LOG_LEVEL: "INFO"
+    RETENTION_DAYS: "{{ cloudwatch.metrics.retention_days }}"
+  vpc_config:
+    enabled: true
+    subnet_ids: []  # To be filled by deployment
+    security_group_ids: []  # To be filled by deployment
+
+#####################################
+# Systems Manager Configuration
+#####################################
+ssm:
+  enabled: true
+  session:
+    logging_enabled: true
+    log_retention_days: 30
+  automation:
+    enabled: true
+    log_level: "INFO"
+  maintenance_window:
+    enabled: true
+    schedule: "cron(0 0 ? * SUN *)"  # Weekly on Sunday
+    duration: "PT2H"  # 2 hours
+    cutoff: "PT1H"  # 1 hour
+
+#####################################
+# Monitoring Configuration
+#####################################
+monitoring:
+  thresholds:
+    warning:
+      disk_used_percent: 70
+      evaluation_periods: 3
+      datapoints_to_alarm: 2
+    critical:
+      disk_used_percent: 85
+      evaluation_periods: 2
+      datapoints_to_alarm: 2
+  alerts:
+    enabled: true
+    sns_topic_name: "disk-monitoring-alerts"
+    subscribers:
+      - protocol: "email"
+        endpoint: "ops-team@example.com"
+
+#####################################
+# IAM Configuration
+#####################################
+iam:
+  cross_account_role:
+    name: "MonitoringRole"
+    path: "/monitoring/"
+    managed_policies:
+      - "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+      - "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+  lambda_role:
+    name: "DiskMetricsProcessorRole"
+    path: "/monitoring/"
+    managed_policies:
+      - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      - "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
+
+#####################################
+# Error Handling Configuration
+#####################################
+error_handling:
+  retry:
+    max_attempts: 3
+    delay: 10
+    backoff: 2
+  notifications:
+    enabled: true
+    sns_topic: "{{ monitoring.alerts.sns_topic_name }}"
+  fallback:
+    enabled: true
+    alternative_metrics_collection: true
+
+#####################################
+# Logging Configuration
+#####################################
+logging:
+  cloudwatch:
+    enabled: true
+    log_group: "/aws/disk-monitoring"
+    retention_days: 30
+  s3:
+    enabled: true
+    prefix: "logs/"
+  level: "INFO"
+  include_debug: false
+
+#####################################
+# Backup Configuration
+#####################################
+backup:
+  enabled: true
+  schedule:
+    config_backup: "cron(0 1 * * ? *)"  # Daily at 1 AM
+    metrics_backup: "cron(0 2 * * ? *)"  # Daily at 2 AM
+  retention:
+    config: 90
+    metrics: 30
+  destination:
+    bucket_suffix: "-backup"
+    region: "{{ aws.region }}"
+
+#####################################
+# Performance Configuration
+#####################################
+performance:
+  metric_batch_size: 20
+  concurrent_executions: 5
+  timeout:
+    collection: 60
+    processing: 300
+  optimization:
+    enabled: true
+    compression: true
+    batch_processing: true
+
+#####################################
+# Security Configuration
+#####################################
+security:
+  encryption:
+    s3: 
+      enabled: true
+      type: "AES256"
+    cloudwatch:
+      enabled: true
+    lambda:
+      enabled: true
+  network:
+    vpc_endpoints:
+      enabled: true
+      services:
+        - "s3"
+        - "monitoring"
+        - "ssm"
+  compliance:
+    logging_mandatory: true
+    encryption_mandatory: true
+    tags_mandatory: true
+
+#####################################
+# Tag Configuration
+#####################################
+required_tags:
+  - key: "Environment"
+    enforced: true
+  - key: "Project"
+    enforced: true
+  - key: "ManagedBy"
+    enforced: true
+
+#####################################
+# Notification Configuration
+#####################################
+notifications:
+  slack:
+    enabled: false
+    webhook_url: ""
+    channel: "#monitoring"
+  email:
+    enabled: true
+    sender: "monitoring@example.com"
+    recipients:
+      - "ops-team@example.com"
+  sns:
+    enabled: true
+    topic_name: "{{ monitoring.alerts.sns_topic_name }}"
+
+#####################################
+# Debug Configuration
+#####################################
+debug:
+  enabled: false
+  verbose_logging: false
+  keep_temp_files: false
+  test_mode: false

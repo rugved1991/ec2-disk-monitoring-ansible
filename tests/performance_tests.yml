@@ -1,0 +1,25 @@
+---
+#####################################
+# Performance Tests
+#####################################
+
+- name: Test Performance Metrics
+  hosts: member_accounts
+  gather_facts: false
+  tags: [performance]
+  
+  tasks:
+    - name: Test collection performance
+      block:
+        - name: Time metric collection
+          include_role:
+            name: disk-monitoring
+            tasks_from: collect.yml
+          register: collection_timing
+          
+        - name: Verify collection speed
+          assert:
+            that:
+              - collection_timing.duration < 10
+            fail_msg: "Collection too slow"
+      tags: [test_timing]

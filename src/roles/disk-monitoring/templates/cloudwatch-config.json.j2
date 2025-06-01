@@ -1,0 +1,78 @@
+{
+    "agent": {
+        "metrics_collection_interval": {{ cloudwatch.metrics.collection_interval }},
+        "run_as_user": "{{ cloudwatch.agent.run_as_user }}",
+        "logfile": "/opt/aws/amazon-cloudwatch-agent/logs/amazon-cloudwatch-agent.log",
+        "debug": {{ debug.enabled | lower }},
+        "region": "{{ aws_region }}"
+    },
+    "metrics": {
+        "namespace": "{{ cloudwatch.namespace }}",
+        "append_dimensions": {
+            "InstanceId": "${aws:InstanceId}",
+            "AccountId": "${aws:AccountId}",
+            "AutoScalingGroupName": "${aws:AutoScalingGroupName}",
+            "Environment": "{{ env | default('production') }}",
+            "Region": "{{ aws_region }}"
+        },
+        "metrics_collected": {
+            "disk": {
+                "measurement": [
+                    {% for measurement in cloudwatch.agent.metrics_collection.disk.measurements %}
+                    {
+                        "name": "{{ measurement.name }}",
+                        "unit": "{{ measurement.unit }}"
+                    }{% if not loop.last %},{% endif %}
+                    {% endfor %}
+                ],
+                "resources": {{ cloudwatch.agent.metrics_collection.disk.resources | to_json }},
+                "ignore_file_system_types": {{ cloudwatch.agent.metrics_collection.disk.ignore_file_systems | to_json }},
+                "metrics_collection_interval": {{ cloudwatch.metrics.collection_interval }},
+                "drop_device": false
+            },
+            {% if monitoring.memory_enabled | default(true) %}
+            "mem": {
+                "measurement": [
+                    {"name": "mem_used_percent", "unit": "Percent"},
+                    {"name": "mem_available", "unit": "Bytes"},
+                    {"name": "mem_total", "unit": "Bytes"}
+                ],
+                "metrics_collection_interval": {{ cloudwatch.metrics.collection_interval }}
+            },
+            {% endif %}
+            {% if monitoring.swap_enabled | default(true) %}
+            "swap": {
+                "measurement": [
+                    {"name": "swap_used_percent", "unit": "Percent"},
+                    {"name": "swap_free", "unit": "Bytes"}
+                ],
+                "metrics_collection_interval": {{ cloudwatch.metrics.collection_interval }}
+            }
+            {% endif %}
+        },
+        "force_flush_interval": {{ performance.metric_batch_size }}
+    },
+    "logs": {
+        "logs_collected": {
+            "files": {
+                "collect_list": [
+                    {
+                        "file_path": "/opt/aws/amazon-cloudwatch-agent/logs/amazon-cloudwatch-agent.log",
+                        "log_group_name": "{{ logging.cloudwatch.log_group }}/agent",
+                        "log_stream_name": "{instance_id}/agent",
+                        "retention_in_days": {{ logging.cloudwatch.retention_days }},
+                        "timestamp_format": "%Y-%m-%d %H:%M:%S"
+                    },
+                    {
+                        "file_path": "/var/log/messages",
+                        "log_group_name": "{{ logging.cloudwatch.log_group }}/system",
+                        "log_stream_name": "{instance_id}/system",
+                        "retention_in_days": {{ logging.cloudwatch.retention_days }}
+                    }
+                ]
+            }
+        },
+        "log_stream_name": "{instance_id}/{ip_address}",
+        "force_flush_interval": 15
+    }
+}
