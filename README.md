@@ -21,7 +21,7 @@ This solution implements centralized disk utilization monitoring across multiple
 ## Quick Start
 1. Clone this repository
 ```bash
-git clone https://github.com/your-org/disk-monitoring.git
+git clone https://github.com/rugved1991/ec2-disk-monitoring-ansible.git
 cd disk-monitoring
 ```
 
