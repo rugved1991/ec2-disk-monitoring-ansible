@@ -66,7 +66,7 @@ export ANSIBLE_HOST_KEY_CHECKING=False
 
 ### 1. Clone Repository
 ```bash
-git clone https://github.com/rugved1991/disk-monitoring.git
+git clone https://github.com/rugved1991/ec2-disk-monitoring-ansible.git
 cd disk-monitoring
 ```
 
